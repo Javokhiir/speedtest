@@ -1,0 +1,12 @@
+{
+  "name": "speedtest",
+  "version": "1.0.0",
+  "description": "Console download speed test: 10 sequential requests, average time, total volume, speed in Mbit/s",
+  "main": "speedtest.js",
+  "bin": { "speedtest": "speedtest.js" },
+  "scripts": {
+    "start": "node speedtest.js",
+    "test": "node --test"
+  },
+  "engines": { "node": ">=18" }
+}

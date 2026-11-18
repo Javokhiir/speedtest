@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+'use strict';
 // Download speed test: N sequential GET requests to one URL,
 // each body read to the end, then average time, total bytes and speed.
 
@@ -14,15 +15,16 @@ function usage() {
 }
 
 function parseArgs(argv) {
-  const opts = { url: null, count: DEFAULT_COUNT, timeoutMs: DEFAULT_TIMEOUT_MS };
+  const opts = { url: null, count: DEFAULT_COUNT, timeoutMs: DEFAULT_TIMEOUT_MS, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '-h' || a === '--help') { usage(); process.exit(0); }
+    if (a === '-h' || a === '--help') opts.help = true;
     else if (a === '--count') opts.count = Number(argv[++i]);
     else if (a === '--timeout') opts.timeoutMs = Number(argv[++i]) * 1000;
     else if (!opts.url) opts.url = a;
     else throw new Error(`Unknown argument: ${a}`);
   }
+  if (opts.help) return opts;
   if (!opts.url) throw new Error('URL is required');
   let parsed;
   try { parsed = new URL(opts.url); } catch { throw new Error(`Invalid URL: ${opts.url}`); }
@@ -33,7 +35,7 @@ function parseArgs(argv) {
 }
 
 // One request: time from sending until the last body byte is received.
-async function measureOnce(url, timeoutMs) {
+async function measureOnce(url, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const start = process.hrtime.bigint();
@@ -41,54 +43,90 @@ async function measureOnce(url, timeoutMs) {
     const res = await fetch(url, {
       signal: controller.signal,
       cache: 'no-store',
+      // identity: ask for the raw file, so we measure real bytes, not a gzip copy
       headers: { 'Cache-Control': 'no-cache', 'Accept-Encoding': 'identity' },
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`.trim());
     let bytes = 0;
-    // Stream the body chunk by chunk: counts real bytes and keeps memory flat for big files.
-    for await (const chunk of res.body) bytes += chunk.length;
+    // Read the body as a stream: counts bytes as they arrive, keeps memory flat for big files.
+    for await (const chunk of res.body ?? []) bytes += chunk.length;
     const seconds = Number(process.hrtime.bigint() - start) / 1e9;
     return { bytes, seconds };
   } catch (err) {
-    if (err.name === 'AbortError') throw new Error(`timeout after ${timeoutMs / 1000}s`);
+    if (controller.signal.aborted) throw new Error(`timeout after ${timeoutMs / 1000}s`);
     throw err;
   } finally {
     clearTimeout(timer);
   }
 }
 
-const fmtMB = (bytes) => (bytes / 1e6).toFixed(2);
-const mbps = (bytes, seconds) => (bytes * 8) / 1e6 / seconds;
+// Requests go strictly one after another: the next starts only when the previous has finished.
+// A failed request is kept in the list as { ok: false } and does not stop the run.
+async function runSequential(url, count, timeoutMs, onResult = () => {}) {
+  const results = [];
+  for (let i = 1; i <= count; i++) {
+    let result;
+    try {
+      result = { ok: true, ...(await measureOnce(url, timeoutMs)) };
+    } catch (err) {
+      result = { ok: false, error: err.cause?.message || err.message };
+    }
+    results.push(result);
+    onResult(i, result);
+  }
+  return results;
+}
+
+const toMbit = (bytes, seconds) => (seconds > 0 ? (bytes * 8) / 1e6 / seconds : 0);
+
+// Totals over successful requests only. Speed = all bytes / all time,
+// not the mean of per-request speeds, so every request weighs by its real size.
+function summarize(results) {
+  const ok = results.filter((r) => r.ok);
+  const totalBytes = ok.reduce((sum, r) => sum + r.bytes, 0);
+  const totalSeconds = ok.reduce((sum, r) => sum + r.seconds, 0);
+  return {
+    requested: results.length,
+    succeeded: ok.length,
+    totalBytes,
+    avgSeconds: ok.length ? totalSeconds / ok.length : 0,
+    mbitPerSec: toMbit(totalBytes, totalSeconds),
+  };
+}
+
+const toMB = (bytes) => (bytes / 1e6).toFixed(2);
 
 async function main() {
   let opts;
-  try { opts = parseArgs(process.argv.slice(2)); }
-  catch (err) { console.error(`Error: ${err.message}\n`); usage(); process.exit(1); }
+  try {
+    opts = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    console.error(`Error: ${err.message}\n`);
+    usage();
+    process.exit(1);
+  }
+  if (opts.help) return usage();
 
   console.log(`Testing ${opts.url} with ${opts.count} sequential requests\n`);
-  const results = [];
-  for (let i = 1; i <= opts.count; i++) {
-    try {
-      const r = await measureOnce(opts.url, opts.timeoutMs);
-      results.push(r);
-      console.log(`#${String(i).padStart(2)}  ${fmtMB(r.bytes)} MB  ${r.seconds.toFixed(3)} s  ${mbps(r.bytes, r.seconds).toFixed(2)} Mbit/s`);
-    } catch (err) {
-      console.log(`#${String(i).padStart(2)}  failed: ${err.cause?.message || err.message}`);
-    }
+  const results = await runSequential(opts.url, opts.count, opts.timeoutMs, (i, r) => {
+    const n = `#${String(i).padStart(2)}`;
+    if (r.ok) console.log(`${n}  ${toMB(r.bytes)} MB  ${r.seconds.toFixed(3)} s  ${toMbit(r.bytes, r.seconds).toFixed(2)} Mbit/s`);
+    else console.log(`${n}  failed: ${r.error}`);
+  });
+
+  const s = summarize(results);
+  if (s.succeeded === 0) {
+    console.error('\nAll requests failed.');
+    process.exit(1);
   }
-
-  if (results.length === 0) { console.error('\nAll requests failed.'); process.exit(1); }
-
-  const totalBytes = results.reduce((s, r) => s + r.bytes, 0);
-  const totalSeconds = results.reduce((s, r) => s + r.seconds, 0);
-  const speed = mbps(totalBytes, totalSeconds);
-
   console.log(`
-Successful requests: ${results.length}/${opts.count}
-Average request time: ${(totalSeconds / results.length).toFixed(3)} s
-Total downloaded:     ${fmtMB(totalBytes)} MB
-Download speed:       ${speed.toFixed(2)} Mbit/s (${(speed / 8).toFixed(2)} MB/s)`);
-  if (results.length < opts.count) process.exit(2);
+Successful requests: ${s.succeeded}/${s.requested}
+Average request time: ${s.avgSeconds.toFixed(3)} s
+Total downloaded:     ${toMB(s.totalBytes)} MB
+Download speed:       ${s.mbitPerSec.toFixed(2)} Mbit/s (${(s.mbitPerSec / 8).toFixed(2)} MB/s)`);
+  if (s.succeeded < s.requested) process.exitCode = 2;
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { parseArgs, measureOnce, runSequential, summarize };

@@ -1,54 +1,84 @@
 # speedtest
 
-A console script that measures download speed. It sends 10 requests **one after another** to the address you give, waits for each response body to arrive in full, and then prints the average request time, the total amount downloaded and the download speed.
+Консольный скрипт для замера скорости скачивания. Делает 10 запросов **последовательно** к указанному адресу, дожидается полного ответа на каждый, затем печатает среднее время запроса, общий объём скачанных данных и скорость.
 
-Node.js 18+ is required. There are no dependencies, because it uses the built-in `fetch`.
+Написан на Node.js без зависимостей: используется встроенный `fetch`.
 
-## Run
+## Запуск
+
+Нужен Node.js 18 или новее. Устанавливать ничего не надо.
 
 ```bash
 git clone https://github.com/Javokhiir/speedtest.git
 cd speedtest
-node speedtest.js https://proof.ovh.net/files/10Mb.dat
+node speedtest.js https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg
 ```
 
-Options:
+Адрес может быть любым `http`/`https` URL, лучше брать тяжёлый файл (картинку на несколько мегабайт): на маленьком файле время уходит на установку соединения, а не на скачивание.
 
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--count N` | 10 | number of sequential requests |
-| `--timeout SEC` | 60 | timeout for each request, in seconds |
+Параметры:
+
+| Флаг | По умолчанию | Что делает |
+|------|--------------|------------|
+| `--count N` | 10 | число последовательных запросов |
+| `--timeout SEC` | 60 | таймаут одного запроса в секундах |
+| `--help` | | показать справку |
 
 ```bash
-node speedtest.js https://proof.ovh.net/files/10Mb.dat --count 3
+node speedtest.js https://proof.ovh.net/files/10Mb.dat --count 3 --timeout 30
 ```
 
-## Example output
+## Пример вывода
 
 ```
-Testing https://proof.ovh.net/files/10Mb.dat with 3 sequential requests
+Testing https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg with 10 sequential requests
 
-# 1  10.49 MB  14.378 s  5.83 Mbit/s
-# 2  10.49 MB  12.112 s  6.93 Mbit/s
-# 3  10.49 MB  12.645 s  6.63 Mbit/s
+# 1  14.68 MB  21.247 s  5.53 Mbit/s
+# 2  14.68 MB  30.637 s  3.83 Mbit/s
+# 3  14.68 MB  18.030 s  6.51 Mbit/s
+# 4  14.68 MB  18.251 s  6.43 Mbit/s
+# 5  14.68 MB  18.545 s  6.33 Mbit/s
+# 6  14.68 MB  16.348 s  7.18 Mbit/s
+# 7  14.68 MB  20.374 s  5.76 Mbit/s
+# 8  14.68 MB  23.376 s  5.02 Mbit/s
+# 9  14.68 MB  22.542 s  5.21 Mbit/s
+#10  14.68 MB  19.092 s  6.15 Mbit/s
 
-Successful requests: 3/3
-Average request time: 13.045 s
-Total downloaded:     31.46 MB
-Download speed:       6.43 Mbit/s (0.80 MB/s)
+Successful requests: 10/10
+Average request time: 20.844 s
+Total downloaded:     146.79 MB
+Download speed:       5.63 Mbit/s (0.70 MB/s)
 ```
 
-## Units
+## Единицы измерения
 
-- **Request time** is in seconds. It runs from sending the request until the last byte of the body is received, so the time to first byte is included.
-- **Volume** is in megabytes, where **1 MB = 1,000,000 bytes** (decimal, as providers count it).
-- **Speed** is in **megabits per second (Mbit/s)**, the unit internet plans use: `total bytes × 8 / 1,000,000 / total time of all requests`. The value in MB/s is shown in brackets.
+- **Время запроса** в секундах (`s`): от отправки запроса до получения последнего байта тела.
+- **Объём** в мегабайтах (`MB`), **1 MB = 1 000 000 байт**.
+- **Скорость** в **мегабитах в секунду (`Mbit/s`)**, как в тарифах провайдеров. В скобках то же значение в мегабайтах в секунду (`MB/s`), 1 MB/s = 8 Mbit/s.
 
-Speed is computed from the totals, not as an average of the per-request speeds, so slow and fast requests are weighted by their real size.
+Формула: `скорость = сумма байт × 8 / 1 000 000 / сумма времени всех запросов`.
 
-## How it works
+Скорость считается по общим суммам, а не как среднее скоростей отдельных запросов. Так каждый запрос учитывается пропорционально своему объёму и времени.
 
-- The requests run sequentially in a `for` loop with `await`, so the next one starts only after the previous one has finished.
-- The body is read as a stream, chunk by chunk. Bytes are counted as they arrive and the file is not held in memory, so even large files work.
-- `Accept-Encoding: identity` and `Cache-Control: no-cache` are sent so that the measurement uses the real bytes rather than a gzip-compressed or cached copy.
-- A failed request (a timeout or an HTTP error) is reported in the log and left out of the totals. If any request failed, the exit code is `2`. If all of them failed, it is `1`.
+## Как это работает
+
+- Запросы идут строго по очереди: цикл `for` с `await`, следующий запрос стартует только после завершения предыдущего.
+- Тело ответа читается потоком, по кускам. Байты считаются по мере прихода, файл не хранится в памяти, поэтому размер файла не ограничен.
+- Отправляются заголовки `Accept-Encoding: identity` и `Cache-Control: no-cache`, чтобы мерить реальные байты файла, а не сжатую или закешированную копию.
+- Неудачный запрос (таймаут, сетевая ошибка, HTTP-статус не 2xx) печатается в логе и не входит в итоги; замер при этом продолжается.
+
+Коды выхода: `0` если все запросы успешны, `2` если часть запросов не удалась, `1` если не удался ни один или аргументы неверны.
+
+## Что стоит учитывать
+
+- Первый запрос обычно медленнее остальных: в него входят DNS, TCP и TLS. Следующие запросы переиспользуют то же соединение (keep-alive).
+- Замер идёт в один поток до одного сервера. Это скорость скачивания с этого сервера, а не максимум канала: результат зависит от самого сервера и маршрута до него.
+- Время запроса включает ожидание первого байта, то есть время ответа сервера.
+
+## Тесты
+
+```bash
+npm test
+```
+
+Тесты написаны на встроенном `node:test` и поднимают локальный HTTP-сервер, интернет для них не нужен. Проверяется точный подсчёт байт, последовательность запросов (никогда не больше одного одновременно), обработка HTTP-ошибок и таймаута, расчёт итогов и разбор аргументов.
